@@ -1,0 +1,94 @@
+name: Build MEW Proxy unsigned IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname 'MEW-Proxy-Source.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Không tìm thấy MEW-Proxy-Source.zip ở thư mục gốc repository."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/source"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/source"
+
+      - name: Locate Xcode project and scheme
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT="$(find "$RUNNER_TEMP/source" -name '*.xcodeproj' -type d -print -quit)"
+          if [ -z "$PROJECT" ]; then
+            echo "Không tìm thấy file .xcodeproj trong ZIP."
+            exit 1
+          fi
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          xcodebuild -list -project "$PROJECT"
+          echo "scheme=OGIOS" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned IPA
+        env:
+          PROJECT: ${{ steps.locate.outputs.project }}
+          SCHEME: ${{ steps.locate.outputs.scheme }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ARCHIVE="$RUNNER_TEMP/MEWProxy.xcarchive"
+          LOG="$RUNNER_TEMP/xcodebuild.log"
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$ARCHIVE" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            PRODUCT_BUNDLE_IDENTIFIER=vn.mew.proxy \
+            archive 2>&1 | tee "$LOG"
+
+          APP_PATH="$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "Build không tạo ra ứng dụng .app."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/Payload" \
+            "$RUNNER_TEMP/MEW-Proxy-unsigned.ipa"
+
+          test -s "$RUNNER_TEMP/MEW-Proxy-unsigned.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MEW-Proxy-unsigned-IPA
+          path: ${{ runner.temp }}/MEW-Proxy-unsigned.ipa
+          retention-days: 7
+
+      - name: Upload build log if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MEW-Proxy-build-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
